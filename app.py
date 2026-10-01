@@ -485,6 +485,7 @@ def handle_webhook(username="architechlaboratory"):
                       response_text = "Tuan, ini gambar produk demo. Ini hanya contoh; gambar dan maklumat produk sebenar perlu disahkan dengan staf."
                     else:
                       response_text = "Maaf tuan, gambar demo belum berjaya dihantar. Sila minta staf tunjukkan contoh produk melalui saluran rasmi."
+                response_text = clean_whatsapp_reply(response_text)
                 send_whatsapp_message(
                     client_data["whatsapp_phone_id"],
                     client_data["whatsapp_token"],
@@ -693,7 +694,16 @@ def _generate_asai_response(prompt_text, brain, history=None, username="architec
       raise ValueError("ASAI_API_KEY belum dikonfigurasi")
     instruction = (brain.persona_instruction +
                    "\nFAKTA SYARIKAT DISAHKAN (rujuk hanya jika relevan, jangan salin semuanya):\n" +
-                   load_company_knowledge(username))
+                   load_company_knowledge(username) +
+                   "\nARAHAN FORMAT BALASAN WHATSAPP (utamakan selepas membaca fakta): "
+                   "Jawab mesej terkini secara terus dalam 1–2 ayat pendek jika soalan mudah. "
+                   "Jangan guna senarai bernombor, bullet atau menu pilihan melainkan pelanggan "
+                   "meminta senarai atau langkah terperinci. Jangan guna awalan seperti "
+                   "💬 [Pegawai Khidmat Pelanggan - Architech Systems]: atau "
+                   "[Customer Service - Architech Systems]:. Balas sebagai teks WhatsApp biasa. "
+                   "Jangan ulang salam, pengenalan atau soalan yang sudah dijawab. Tanya satu soalan hanya jika perlu untuk "
+                   "menjawab permintaan pelanggan; jika sekadar berbual, balas seperti perbualan biasa. "
+                   "Untuk harga, terma, keselamatan atau isu teknikal, beri butiran penting yang relevan.")
     messages = [{"role": "system", "content": instruction}]
     messages += [{"role": "user" if item["sender"] == "customer" else "assistant",
                   "content": item["text"][:1000]}
@@ -723,7 +733,15 @@ def _generate_asai_response(prompt_text, brain, history=None, username="architec
       )
 
 
+def clean_whatsapp_reply(message_text):
+  return re.sub(
+      r"^\s*(?:💬\s*)?\[(?:Pegawai Khidmat Pelanggan|Customer Service) - Architech Systems(?: \([^\]]+\))?\]:\s*",
+      "", message_text,
+  ).strip()
+
+
 def send_whatsapp_message(phone_id, token, to_number, message_text):
+  message_text = clean_whatsapp_reply(message_text)
   if not phone_id or not token:
     logging.error(
         "Kredensial WhatsApp pelanggan tidak lengkap atau kosong."

@@ -10,6 +10,16 @@ import app
 
 
 class ConnectionsTest(unittest.TestCase):
+    def test_whatsapp_reply_has_no_role_prefix(self):
+        for label in ("💬 [Pegawai Khidmat Pelanggan - Architech Systems]",
+                      "💬 [Pegawai Khidmat Pelanggan - Architech Systems (CLI-1001)]",
+                      "[Customer Service - Architech Systems]"):
+            self.assertEqual(app.clean_whatsapp_reply(f"{label}: Baik, boleh saya bantu?"),
+                             "Baik, boleh saya bantu?")
+        with patch.object(app.requests, "post") as post:
+            app.send_whatsapp_message("id", "token", "6012", "💬 [Pegawai Khidmat Pelanggan - Architech Systems]: Waalaikumussalam!")
+            self.assertEqual(post.call_args.kwargs["json"]["text"]["body"], "Waalaikumussalam!")
+
     def test_demo_and_engine(self):
         engine = app.CLIENT_ENGINES["architechlaboratory"]
         self.assertEqual(engine.one_off_setup_fee, 499.00)
@@ -27,6 +37,7 @@ class ConnectionsTest(unittest.TestCase):
             self.assertIn("Aluzlia", instruction)
             self.assertIn("1–2 ayat pendek", instruction)
             self.assertIn("Jangan berpura-pura menjadi manusia", instruction)
+            self.assertIn("Jangan guna senarai bernombor, bullet atau menu pilihan", instruction)
             self.assertEqual(generate.call_args.kwargs["json"]["model"], "asai/claude-haiku-4.5")
             generate.side_effect = RuntimeError("asAI unavailable")
             self.assertIn("RM130", app.generate_ai_response("harga pakej"))
