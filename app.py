@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import smtplib
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
@@ -9,8 +10,8 @@ from email.mime.text import MIMEText
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
-from google import genai
 from leea_engine import LEEASystemEngine
+from company_knowledge import load_company_knowledge
 from demo_examples import wants_product_image
 import requests
 
@@ -26,7 +27,9 @@ load_dotenv()
 
 app = Flask(__name__)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ASAI_API_KEY = os.getenv("ASAI_API_KEY", "")
+ASAI_MODEL = os.getenv("ASAI_MODEL", "asai/claude-haiku-4.5")
+ASAI_BASE_URL = os.getenv("API_BASE_URL", "https://serveras.click/v1").rstrip("/")
 
 # URL Pangkalan Data PostgreSQL (Tarik dari Variables Railway)
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -41,7 +44,6 @@ GOOGLE_SHEET_WEB_APP_URL = os.getenv("GOOGLE_SHEET_WEB_APP_URL", "")
 GOOGLE_SHEET_CHAT_HISTORY_URL = os.getenv("GOOGLE_SHEET_CHAT_HISTORY_URL", "")
 
 # Inisialisasi Klien Gemini dan enjin setiap akaun
-client = genai.Client(api_key=GEMINI_API_KEY)
 CLIENT_ENGINES = {
     "architechlaboratory": LEEASystemEngine(client_name="Architech Systems"),
     "aluzlia": LEEASystemEngine(client_name="Aluzlia"),
@@ -110,11 +112,11 @@ def save_chat_to_postgres(username, sender_phone, message_text, role="customer")
     if not DATABASE_URL:
         logging.warning("DATABASE_URL tiada. Melangkau proses penyimpanan PostgreSQL.")
         return
-        
+
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        
+
         # 1. Bina jadual 'messages' jika ia belum wujud dalam database
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS messages (
@@ -125,32 +127,55 @@ def save_chat_to_postgres(username, sender_phone, message_text, role="customer")
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        
+
         # 2. Dapatkan ID Klien berdasarkan nama pengguna
         cursor.execute("SELECT id FROM clients WHERE username = %s;", (username,))
         res = cursor.fetchone()
-        
+
         if res:
             client_id = res[0]
-            
+
             # Jika mesej daripada pelanggan, rekod sender sbg no telefon. Jika tidak, "Zulfa Bot".
             db_sender = sender_phone if role == "customer" else "Zulfa Bot"
-            
+
             # 3. Masukkan rekod mesej ke dalam pangkalan data
             cursor.execute(
                 "INSERT INTO messages (client_id, sender, message, timestamp) VALUES (%s, %s, %s, NOW());",
                 (client_id, db_sender, message_text)
             )
-            
+
             conn.commit()
             logging.info(f"Mesej daripada {db_sender} berjaya didaftarkan ke PostgreSQL.")
         else:
             logging.warning(f"Sistem gagal mencari ID untuk klien: {username}")
-            
+
         cursor.close()
         conn.close()
     except Exception as e:
         logging.error(f"Ralat menyambung/menyimpan ke PostgreSQL: {e}")
+
+
+def load_chat_context(username, sender_phone, limit=10):
+  """Ambil perbualan terkini bagi tenant dan nombor ini sahaja."""
+  if not DATABASE_URL or not sender_phone:
+    return []
+  try:
+    with psycopg2.connect(DATABASE_URL) as conn:
+      with conn.cursor() as cursor:
+        cursor.execute("SELECT id FROM clients WHERE username = %s", (username,))
+        row = cursor.fetchone()
+        if not row:
+          return []
+        cursor.execute(
+            "SELECT sender, message FROM messages WHERE client_id = %s "
+            "AND sender IN (%s, %s, %s) ORDER BY id DESC LIMIT %s",
+            (row[0], sender_phone, "Zulfa Bot", "SEA Bot", limit),
+        )
+        return [{"sender": "customer" if sender == sender_phone else "agent",
+                 "text": text} for sender, text in reversed(cursor.fetchall())]
+  except Exception as exc:
+    logging.warning("Sejarah perbualan tidak tersedia: %s", exc)
+    return []
 
 
 # --- FUNGSI HANTAR E-MEL TERIMA KASIH & PENGESAHAN ---
@@ -397,6 +422,10 @@ def handle_webhook(username="architechlaboratory"):
                   f"Mesej masuk [{username}] drpd {sender_phone}: {message_body}"
               )
 
+              chats = client_data["live_chats"]
+              existing_chat = next((c for c in chats if c["phone"].lstrip("+") == sender_phone.lstrip("+")), None)
+              context = (existing_chat["messages"][-10:] if existing_chat else
+                         load_chat_context(username, sender_phone))
               save_customer_to_google_sheets(username, sender_phone)
               save_chat_history_to_sheets(
                   username,
@@ -405,7 +434,7 @@ def handle_webhook(username="architechlaboratory"):
                   message_text=message_body,
                   role="customer",
               )
-              
+
               # SIMPAN MESEJ MASUK KE POSTGRESQL DASHBOARD
               save_chat_to_postgres(username, sender_phone, message_body, role="customer")
 
@@ -445,7 +474,7 @@ def handle_webhook(username="architechlaboratory"):
               chat_item["lastMessage"] = message_body
 
               if chat_item["mode"] == "ai":
-                response_text = generate_ai_response(message_body, username, sender_phone)
+                response_text = generate_ai_response(message_body, username, sender_phone, context)
                 if wants_product_image(message_body):
                   image_url = client_data.get("demo_product_image_url", "")
                   if image_url.startswith("https://"):
@@ -476,10 +505,10 @@ def handle_webhook(username="architechlaboratory"):
                     message_text=response_text,
                     role="agent",
                 )
-                
+
                 # SIMPAN BALASAN BOT KE POSTGRESQL DASHBOARD
                 save_chat_to_postgres(username, sender_phone, response_text, role="agent")
-                
+
               else:
                 logging.info(
                     f"Chat {sender_phone} di bawah akaun {username} berada"
@@ -638,26 +667,52 @@ def toggle_chat_mode(username="architechlaboratory"):
   return jsonify({"success": True}), 200
 
 
-def generate_ai_response(prompt_text, username="architechlaboratory", sender_phone=""):
+def generate_ai_response(prompt_text, username="architechlaboratory", sender_phone="", history=None):
   engine = CLIENT_ENGINES.get(username)
   if engine is None:
     raise ValueError(f"Unknown tenant: {username}")
+  # Jawab terus soalan ringkas ini; jangan biarkan pangkalan pengetahuan panjang
+  # bertukar menjadi senarai jualan yang tidak diminta.
+  normalized = re.sub(r"[^\w\s]", " ", prompt_text.lower())
+  if (username == "architechlaboratory"
+      and len(normalized.split()) <= 15
+      and re.search(r"\b(selain|ade|ada)\b", normalized)
+      and re.search(r"\b(sistem|servis|service|buat|produk)\b", normalized)
+      and re.search(r"\b(apa|ape|lagi|lain)\b", normalized)):
+    return ("Ada. Selain bot WhatsApp LeeA, Architech Systems juga buat "
+            "sistem automasi dan perisian ikut keperluan bisnes.")
   engine.tenant_username = username
-  return engine.process_incoming_whatsapp_message(
-      sender_phone, prompt_text, responder=_generate_gemini_response
-  )
+  def respond(message, brain):
+    return _generate_asai_response(message, brain, history, username)
+  return engine.process_incoming_whatsapp_message(sender_phone, prompt_text, responder=respond)
 
 
-def _generate_gemini_response(prompt_text, brain):
+def _generate_asai_response(prompt_text, brain, history=None, username="architechlaboratory"):
   try:
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-        contents=prompt_text,
-        config={"system_instruction": brain.persona_instruction},
+    if not ASAI_API_KEY:
+      raise ValueError("ASAI_API_KEY belum dikonfigurasi")
+    instruction = (brain.persona_instruction +
+                   "\nFAKTA SYARIKAT DISAHKAN (rujuk hanya jika relevan, jangan salin semuanya):\n" +
+                   load_company_knowledge(username))
+    messages = [{"role": "system", "content": instruction}]
+    messages += [{"role": "user" if item["sender"] == "customer" else "assistant",
+                  "content": item["text"][:1000]}
+                 for item in (history or [])[-10:]
+                 if item.get("sender") in ("customer", "agent") and item.get("text")]
+    messages.append({"role": "user", "content": prompt_text})
+    response = requests.post(
+        f"{ASAI_BASE_URL}/chat/completions",
+        headers={"Authorization": f"Bearer {ASAI_API_KEY}", "Content-Type": "application/json"},
+        json={"model": ASAI_MODEL, "messages": messages, "max_tokens": 350},
+        timeout=30,
     )
-    return response.text
+    response.raise_for_status()
+    answer = response.json()["choices"][0]["message"]["content"]
+    if not isinstance(answer, str) or not answer.strip():
+      raise ValueError("Jawapan AI kosong")
+    return answer.strip()
   except Exception as e:
-    logging.error(f"Ralat Gemini API: {e}")
+    logging.error("Ralat asAI API: %s", type(e).__name__)
     try:
       return brain.generate_response(prompt_text)
     except Exception as e2:
