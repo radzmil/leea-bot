@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import smtplib
+from collections import deque
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -73,6 +74,9 @@ CLIENTS_DATABASE = {
     },
 }
 
+# Meta boleh menghantar semula webhook yang sama; cache ini terhad per proses.
+PROCESSED_MESSAGE_IDS = {}
+
 
 # --- PELINDUNG CORS UNTUK MEMBENARKAN VERCEL MENGAKSES RAILWAY ---
 @app.after_request
@@ -127,6 +131,7 @@ def save_chat_to_postgres(username, sender_phone, message_text, role="customer")
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS prospect_phone VARCHAR(50);")
 
         # 2. Dapatkan ID Klien berdasarkan nama pengguna
         cursor.execute("SELECT id FROM clients WHERE username = %s;", (username,))
@@ -140,8 +145,8 @@ def save_chat_to_postgres(username, sender_phone, message_text, role="customer")
 
             # 3. Masukkan rekod mesej ke dalam pangkalan data
             cursor.execute(
-                "INSERT INTO messages (client_id, sender, message, timestamp) VALUES (%s, %s, %s, NOW());",
-                (client_id, db_sender, message_text)
+                "INSERT INTO messages (client_id, sender, message, prospect_phone, timestamp) VALUES (%s, %s, %s, %s, NOW());",
+                (client_id, db_sender, message_text, sender_phone)
             )
 
             conn.commit()
@@ -168,8 +173,8 @@ def load_chat_context(username, sender_phone, limit=10):
           return []
         cursor.execute(
             "SELECT sender, message FROM messages WHERE client_id = %s "
-            "AND sender IN (%s, %s, %s) ORDER BY id DESC LIMIT %s",
-            (row[0], sender_phone, "Zulfa Bot", "SEA Bot", limit),
+            "AND prospect_phone = %s ORDER BY id DESC LIMIT %s",
+            (row[0], sender_phone, limit),
         )
         return [{"sender": "customer" if sender == sender_phone else "agent",
                  "text": text} for sender, text in reversed(cursor.fetchall())]
@@ -406,18 +411,24 @@ def handle_webhook(username="architechlaboratory"):
           value = change.get("value", {})
           messages = value.get("messages", [])
 
-          if messages:
-            message = messages[0]
+          for message in messages:
+            message_id = message.get("id")
+            seen = PROCESSED_MESSAGE_IDS.setdefault(username, deque(maxlen=1000))
+            if message_id and message_id in seen:
+              continue
 
             sender_phone = str(
                 message.get("from")
                 or value.get("contacts", [{}])[0].get("wa_id", "")
                 or message.get("sender", "")
+                or message.get("from_user_id", "")
             ).strip()
 
             message_body = message.get("text", {}).get("body", "")
 
             if message_body and sender_phone and sender_phone != "None":
+              if message_id:
+                seen.append(message_id)
               logging.info(
                   f"Mesej masuk [{username}] drpd {sender_phone}: {message_body}"
               )
@@ -452,9 +463,7 @@ def handle_webhook(username="architechlaboratory"):
 
               if not chat_item:
                 formatted_phone = (
-                    f"+{sender_phone}"
-                    if not sender_phone.startswith("+")
-                    else sender_phone
+                    f"+{sender_phone}" if sender_phone.isdigit() else sender_phone
                 )
                 chat_item = {
                     "id": f"chat_{len(chats) + 1}",
@@ -486,12 +495,15 @@ def handle_webhook(username="architechlaboratory"):
                     else:
                       response_text = "Maaf tuan, gambar demo belum berjaya dihantar. Sila minta staf tunjukkan contoh produk melalui saluran rasmi."
                 response_text = clean_whatsapp_reply(response_text)
-                send_whatsapp_message(
+                sent = send_whatsapp_message(
                     client_data["whatsapp_phone_id"],
                     client_data["whatsapp_token"],
                     sender_phone,
                     response_text,
                 )
+                if sent is False:
+                  logging.error("Balasan WhatsApp gagal dihantar untuk akaun %s, pengirim %s", username, sender_phone)
+                  continue
                 chat_item["messages"].append({
                     "sender": "agent",
                     "text": response_text,
@@ -696,6 +708,10 @@ def _generate_asai_response(prompt_text, brain, history=None, username="architec
                    "\nFAKTA SYARIKAT DISAHKAN (rujuk hanya jika relevan, jangan salin semuanya):\n" +
                    load_company_knowledge(username) +
                    "\nARAHAN FORMAT BALASAN WHATSAPP (utamakan selepas membaca fakta): "
+                   "Gunakan Bahasa Melayu Malaysia untuk semua balasan lalai, termasuk apabila pelanggan "
+                   "menaip bahasa pasar, singkatan atau campuran Inggeris-Melayu. Jangan tukar ke Bahasa "
+                   "Indonesia atau gunakan ungkapan Indonesia seperti 'bisa', 'nggak', 'butuh', 'silakan' "
+                   "dan 'harga cicilan'. Jika pelanggan secara jelas meminta bahasa lain, ikut permintaan itu. "
                    "Jawab mesej terkini secara terus dalam 1–2 ayat pendek jika soalan mudah. "
                    "Jangan guna senarai bernombor, bullet atau menu pilihan melainkan pelanggan "
                    "meminta senarai atau langkah terperinci. Jangan guna awalan seperti "
@@ -746,7 +762,7 @@ def send_whatsapp_message(phone_id, token, to_number, message_text):
     logging.error(
         "Kredensial WhatsApp pelanggan tidak lengkap atau kosong."
     )
-    return
+    return False
 
   url = f"https://graph.facebook.com/v21.0/{phone_id}/messages"
   headers = {
@@ -761,12 +777,15 @@ def send_whatsapp_message(phone_id, token, to_number, message_text):
   }
 
   try:
-    response = requests.post(url, headers=headers, json=payload)
-    logging.info(
-        f"Status hantar WhatsApp: {response.status_code} - {response.text}"
-    )
+    response = requests.post(url, headers=headers, json=payload, timeout=15)
+    if not response.ok:
+      logging.error("Meta menolak balasan WhatsApp: HTTP %s - %s", response.status_code, response.text)
+      return False
+    logging.info("Meta menerima permintaan balasan WhatsApp: HTTP %s", response.status_code)
+    return True
   except Exception as e:
     logging.error(f"Ralat menghantar mesej WhatsApp: {e}")
+    return False
 
 
 def send_whatsapp_image(phone_id, token, to_number, image_url):

@@ -38,6 +38,9 @@ class ConnectionsTest(unittest.TestCase):
             self.assertIn("1–2 ayat pendek", instruction)
             self.assertIn("Jangan berpura-pura menjadi manusia", instruction)
             self.assertIn("Jangan guna senarai bernombor, bullet atau menu pilihan", instruction)
+            self.assertIn("Gunakan Bahasa Melayu Malaysia untuk semua balasan lalai", instruction)
+            self.assertIn("Jangan tukar ke Bahasa Indonesia", instruction)
+            self.assertIn("bahasa pasar atau singkatan", instruction)
             self.assertEqual(generate.call_args.kwargs["json"]["model"], "asai/claude-haiku-4.5")
             generate.side_effect = RuntimeError("asAI unavailable")
             self.assertIn("RM130", app.generate_ai_response("harga pakej"))
@@ -87,7 +90,71 @@ class ConnectionsTest(unittest.TestCase):
             result = app.load_chat_context("aluzlia", "6012")
             self.assertEqual(result[-1]["text"], "Baik")
             self.assertEqual(cursor.execute.call_args_list[0].args[1], ("aluzlia",))
-            self.assertEqual(cursor.execute.call_args_list[1].args[1][:2], (42, "6012"))
+            self.assertEqual(cursor.execute.call_args_list[1].args[1], (42, "6012", 10))
+            self.assertIn("prospect_phone = %s", cursor.execute.call_args_list[1].args[0])
+
+    def test_webhook_duplicate_and_distinct_prospects(self):
+        tenant = app.CLIENTS_DATABASE["architechlaboratory"]
+        with patch.dict(tenant, {"live_chats": []}), patch.object(app, "PROCESSED_MESSAGE_IDS", {}), \
+             patch.object(app, "load_chat_context", return_value=[]), \
+             patch.object(app, "save_customer_to_google_sheets"), \
+             patch.object(app, "save_chat_history_to_sheets"), \
+             patch.object(app, "save_chat_to_postgres"), \
+             patch.object(app, "generate_ai_response", return_value="Baik") as generate, \
+             patch.object(app, "send_whatsapp_message") as send:
+            for phone, msg_id in (("60111", "mid-1"), ("60222", "mid-2"), ("60111", "mid-1")):
+                payload = {"object": "whatsapp_business_account", "entry": [{"changes": [{"value": {
+                    "messages": [{"id": msg_id, "from": phone, "text": {"body": "Hai"}}]
+                }}]}]}
+                self.assertEqual(app.app.test_client().post("/webhook", json=payload).status_code, 200)
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual([call.args[2] for call in send.call_args_list], ["60111", "60222"])
+            self.assertEqual(len(tenant["live_chats"]), 2)
+            self.assertEqual(generate.call_count, 2)
+
+    def test_webhook_from_user_id_is_not_treated_as_phone_number(self):
+        tenant = app.CLIENTS_DATABASE["architechlaboratory"]
+        sender_id = "MY.1689129625508391"
+        with patch.dict(tenant, {"live_chats": []}), patch.object(app, "PROCESSED_MESSAGE_IDS", {}), \
+             patch.object(app, "load_chat_context", return_value=[]) as load_context, \
+             patch.object(app, "save_customer_to_google_sheets"), \
+             patch.object(app, "save_chat_history_to_sheets"), \
+             patch.object(app, "save_chat_to_postgres"), \
+             patch.object(app, "generate_ai_response", return_value="Hai!") as generate, \
+             patch.object(app, "send_whatsapp_message") as send:
+            payload = {"object": "whatsapp_business_account", "entry": [{"changes": [{"value": {
+                "messages": [{"id": "wamid-test", "from_user_id": sender_id,
+                              "text": {"body": "Haluuuuu"}, "type": "text"}]
+            }}]}]}
+            self.assertEqual(app.app.test_client().post("/webhook", json=payload).status_code, 200)
+            self.assertEqual(tenant["live_chats"][0]["phone"], sender_id)
+            load_context.assert_called_once_with("architechlaboratory", sender_id)
+            self.assertEqual(generate.call_args.args[2], sender_id)
+            self.assertEqual(send.call_args.args[2], sender_id)
+            self.assertEqual(app.app.test_client().post("/webhook", json=payload).status_code, 200)
+            self.assertEqual(send.call_count, 1)
+
+    def test_meta_rejection_does_not_record_bot_reply(self):
+        tenant = app.CLIENTS_DATABASE["architechlaboratory"]
+        with patch.dict(tenant, {"live_chats": [], "whatsapp_phone_id": "phone-id", "whatsapp_token": "token"}), \
+             patch.object(app, "PROCESSED_MESSAGE_IDS", {}), \
+             patch.object(app, "load_chat_context", return_value=[]), \
+             patch.object(app, "save_customer_to_google_sheets"), \
+             patch.object(app, "save_chat_history_to_sheets"), \
+             patch.object(app, "save_chat_to_postgres") as save, \
+             patch.object(app, "generate_ai_response", return_value="Hai!"), \
+             patch.object(app.requests, "post") as post:
+            post.return_value.ok = False
+            post.return_value.status_code = 400
+            post.return_value.text = '{"error":"Invalid recipient"}'
+            payload = {"object": "whatsapp_business_account", "entry": [{"changes": [{"value": {
+                "messages": [{"id": "wamid-rejected", "from_user_id": "MY.1689129625508391",
+                              "text": {"body": "Haluuuuu"}, "type": "text"}]
+            }}]}]}
+            self.assertEqual(app.app.test_client().post("/webhook", json=payload).status_code, 200)
+            self.assertEqual(post.call_args.kwargs["json"]["to"], "MY.1689129625508391")
+            self.assertEqual(save.call_count, 1)
+            self.assertEqual(len(tenant["live_chats"][0]["messages"]), 1)
 
     def test_image_payload_without_network(self):
         with patch.object(app.requests, "post") as post:
