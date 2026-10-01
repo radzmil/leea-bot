@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360" role="img" aria-label="Contoh ilustrasi produk demo">
+  <rect width="640" height="360" fill="#e8f4f1"/>
+  <rect x="60" y="55" width="520" height="250" rx="24" fill="#127d70"/>
+  <text x="320" y="135" text-anchor="middle" fill="white" font-family="Arial" font-size="34">PRODUK CONTOH</text>
+  <text x="320" y="187" text-anchor="middle" fill="white" font-family="Arial" font-size="23">Ilustrasi demo sahaja</text>
+  <text x="320" y="236" text-anchor="middle" fill="white" font-family="Arial" font-size="19">Bukan gambar produk klien</text>
+</svg>
