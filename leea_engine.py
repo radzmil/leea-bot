@@ -6,6 +6,8 @@ Arkitek Sistem: Radzmil Amaluz Zamani Bin Raduen
 """
 
 from leea_brain import LEEABrain
+from leea_engine_messages import process_incoming_whatsapp_message
+from leea_engine_packages import get_packages
 
 class LEEASystemEngine:
     def __init__(self, client_name: str, package_type: str = "Pro-Plan"):
@@ -19,12 +21,7 @@ class LEEASystemEngine:
         
         self.brain = LEEABrain(client_name=self.client_name, business_sop="SOP Rasmi Architech Systems")
         
-        self.packages = {
-            "Basic Plan": {"setup_fee_one_off": 149.00, "monthly_fee": 130.00},
-            "Pro-Plan": {"setup_fee_one_off": 499.00, "monthly_fee": 130.00},
-            "Advance-Plan": {"setup_fee_one_off": 999.00, "monthly_fee": 130.00},
-            "Custom Plan": {"setup_fee_one_off": "Rundingan Teknikal", "monthly_fee": 130.00}
-        }
+        self.packages = get_packages()
         
         current_pkg = self.packages.get(package_type, self.packages["Pro-Plan"])
         self.one_off_setup_fee = current_pkg["setup_fee_one_off"]
@@ -34,12 +31,5 @@ class LEEASystemEngine:
         self.is_active = True
         self.ai_mode = True
 
-    def process_incoming_whatsapp_message(self, sender_phone: str, message_text: str) -> str:
-        if not self.is_active:
-            return "Sistem tidak aktif."
-        if self.ai_mode:
-            response = self.brain.generate_response(message_text)
-            self.used_chat_tokens += 1
-            return response
-        else:
-            return f"[HUMAN TOUCH] Mesej daripada {sender_phone} dialihkan kepada pegawai bertugas Architech Systems."
+    def process_incoming_whatsapp_message(self, sender_phone: str, message_text: str, responder=None) -> str:
+        return process_incoming_whatsapp_message(self, sender_phone, message_text, responder)

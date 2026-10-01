@@ -10,7 +10,8 @@ from email.mime.text import MIMEText
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from google import genai
-from leea_brain import LEEABrain
+from leea_engine import LEEASystemEngine
+from demo_examples import wants_product_image
 import requests
 
 # Pastikan import psycopg2 untuk sambungan PostgreSQL
@@ -31,41 +32,41 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Kredensial & Konfigurasi ToyyibPay & SMTP E-mel
-TOYYIBPAY_SECRET_KEY = "nxehrexd-hx6i-x8au-4idl-3gxlqebywmta"
-SMTP_EMAIL = "architechlaboratory@gmail.com"
-SMTP_PASSWORD = "H@$$ayang8683"
+TOYYIBPAY_SECRET_KEY = os.getenv("TOYYIBPAY_SECRET_KEY", "")
+SMTP_EMAIL = os.getenv("SMTP_EMAIL", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 
 # URL Web App Google Sheets Baharu (DB_architech_laboratory / Log_Chat)
-GAS_ENDPOINT_URL = "https://script.google.com/macros/s/AKfycbyqrB75MYg92E8thEiMPMF1ws1irQpQger3nTZryzR_jIBDHspdSHpE3kHtweCGWHT5/exec"
-GOOGLE_SHEET_WEB_APP_URL = os.getenv("GOOGLE_SHEET_WEB_APP_URL", GAS_ENDPOINT_URL)
-GOOGLE_SHEET_CHAT_HISTORY_URL = os.getenv("GOOGLE_SHEET_CHAT_HISTORY_URL", GAS_ENDPOINT_URL)
+GOOGLE_SHEET_WEB_APP_URL = os.getenv("GOOGLE_SHEET_WEB_APP_URL", "")
+GOOGLE_SHEET_CHAT_HISTORY_URL = os.getenv("GOOGLE_SHEET_CHAT_HISTORY_URL", "")
 
-# Inisialisasi Klien Gemini rasmi & LEEABrain
+# Inisialisasi Klien Gemini dan enjin setiap akaun
 client = genai.Client(api_key=GEMINI_API_KEY)
-leea_brain_instance = LEEABrain(client_name="Architech Systems")
+CLIENT_ENGINES = {
+    "architechlaboratory": LEEASystemEngine(client_name="Architech Systems"),
+    "aluzlia": LEEASystemEngine(client_name="Aluzlia"),
+}
 
 # SIMPANAN DATA MULTI-TENANT
 CLIENTS_DATABASE = {
     "architechlaboratory": {
         "username": "architechlaboratory",
-        "verify_token": os.getenv(
-            "VERIFY_TOKEN_ARCHITECH", "architech_secure_leea_token_2026"
-        ),
+        "verify_token": os.getenv("VERIFY_TOKEN_ARCHITECH", ""),
         "whatsapp_token": os.getenv(
             "WHATSAPP_TOKEN", os.getenv("WHATSAPP_TOKEN_ARCHITECH", "")
         ),
         "whatsapp_phone_id": os.getenv(
             "WHATSAPP_PHONE_ID", os.getenv("WHATSAPP_PHONE_ID_ARCHITECH", "")
         ),
+        "demo_product_image_url": os.getenv("DEMO_PRODUCT_IMAGE_URL_ARCHITECH", ""),
         "live_chats": [],
     },
     "aluzlia": {
         "username": "aluzlia",
-        "verify_token": os.getenv(
-            "VERIFY_TOKEN_ALUZLIA", "aluzlia_secure_token_2026"
-        ),
+        "verify_token": os.getenv("VERIFY_TOKEN_ALUZLIA", ""),
         "whatsapp_token": os.getenv("WHATSAPP_TOKEN_ALUZLIA", ""),
         "whatsapp_phone_id": os.getenv("WHATSAPP_PHONE_ID_ALUZLIA", ""),
+        "demo_product_image_url": os.getenv("DEMO_PRODUCT_IMAGE_URL_ALUZLIA", ""),
         "live_chats": [],
     },
 }
@@ -169,7 +170,7 @@ Terima kasih atas pembayaran anda! Transaksi langganan anda untuk SEA Bot WhatsA
 
 Sistem AI dan bot automasi WhatsApp anda kini terus aktif sepenuhnya tanpa sebarang gangguan. Anda boleh terus log masuk ke portal untuk memantau prestasi kempen dan interaksi live chat.
 
-Jika anda mempunyai sebarang pertanyaan atau memerlukan bantuan teknikal lanjut, hubungi pasukan sokongan kami pada bila-bila masa melalui talian WhatsApp 24/7 di 60183172114 (Architech Systems).
+Jika anda mempunyai sebarang pertanyaan atau memerlukan bantuan teknikal lanjut, hubungi admin Architech Systems di 011-2368-7357.
 
 Yang ikhlas,
 Pasukan Pengurusan & Operasi Architech Systems"""
@@ -179,6 +180,10 @@ Pasukan Pengurusan & Operasi Architech Systems"""
   message["To"] = client_email
   message["Subject"] = subject
   message.attach(MIMEText(body, "plain"))
+
+  if not SMTP_EMAIL or not SMTP_PASSWORD:
+    logging.error("Kredensial SMTP tidak lengkap; e-mel tidak dihantar.")
+    return
 
   try:
     server = smtplib.SMTP("smtp.gmail.com", 587)
@@ -206,8 +211,8 @@ def send_whatsapp_thank_you(client_phone, client_name, new_expiry_date):
       " langganan bulanan *RM130* untuk SEA Bot WhatsApp Automation.\n\n📅"
       f" *Tarikh Luput Akaun Baharu:* {new_expiry_date}\n\nBot dan sistem AI"
       " anda kini terus aktif sepenuhnya tanpa sebarang gangguan. Sekiranya ada"
-      " sebarang persoalan, anda boleh terus berhubung dengan talian support"
-      " 24/7 kami di 60183172114.\n\nTerima kasih kerana menyokong"
+       " sebarang persoalan, hubungi admin Architech Systems"
+       " di 011-2368-7357.\n\nTerima kasih kerana menyokong"
       " perkhidmatan kami! 🚀"
   )
 
@@ -248,7 +253,7 @@ def toyyibpay_callback():
     )
     expected_hash = hashlib.md5(raw_string.encode("utf-8")).hexdigest()
 
-    if received_hash == expected_hash:
+    if TOYYIBPAY_SECRET_KEY and received_hash == expected_hash:
       if str(status) == "1":
         new_expiry_date = "27/10/2026"
 
@@ -342,16 +347,16 @@ def save_chat_history_to_sheets(username, phone, sender, message_text, role="cus
 @app.route("/webhook", methods=["GET"])
 @app.route("/webhook/", methods=["GET"])
 def verify_webhook(username="architechlaboratory"):
-  client_data = CLIENTS_DATABASE.get(
-      username, CLIENTS_DATABASE["architechlaboratory"]
-  )
+  client_data = CLIENTS_DATABASE.get(username)
+  if client_data is None:
+    return "Unknown tenant", 404
 
   mode = request.args.get("hub.mode")
   token = request.args.get("hub.verify_token")
   challenge = request.args.get("hub.challenge")
 
   if mode and token:
-    if mode == "subscribe" and token == client_data["verify_token"]:
+    if mode == "subscribe" and client_data["verify_token"] and token == client_data["verify_token"]:
       logging.info(f"WEBHOOK_VERIFIED untuk Akaun: {username}")
       return challenge, 200
     else:
@@ -362,9 +367,9 @@ def verify_webhook(username="architechlaboratory"):
 @app.route("/webhook", methods=["POST"])
 @app.route("/webhook/", methods=["POST"])
 def handle_webhook(username="architechlaboratory"):
-  client_data = CLIENTS_DATABASE.get(
-      username, CLIENTS_DATABASE["architechlaboratory"]
-  )
+  client_data = CLIENTS_DATABASE.get(username)
+  if client_data is None:
+    return "Unknown tenant", 404
 
   body = request.get_json()
   logging.info(f"Menerima payload webhook untuk akaun [{username}]: {body}")
@@ -440,7 +445,17 @@ def handle_webhook(username="architechlaboratory"):
               chat_item["lastMessage"] = message_body
 
               if chat_item["mode"] == "ai":
-                response_text = generate_ai_response(message_body)
+                response_text = generate_ai_response(message_body, username, sender_phone)
+                if wants_product_image(message_body):
+                  image_url = client_data.get("demo_product_image_url", "")
+                  if image_url.startswith("https://"):
+                    if send_whatsapp_image(
+                        client_data["whatsapp_phone_id"],
+                        client_data["whatsapp_token"], sender_phone, image_url
+                    ):
+                      response_text = "Tuan, ini gambar produk demo. Ini hanya contoh; gambar dan maklumat produk sebenar perlu disahkan dengan staf."
+                    else:
+                      response_text = "Maaf tuan, gambar demo belum berjaya dihantar. Sila minta staf tunjukkan contoh produk melalui saluran rasmi."
                 send_whatsapp_message(
                     client_data["whatsapp_phone_id"],
                     client_data["whatsapp_token"],
@@ -556,9 +571,9 @@ def get_live_chats(username="architechlaboratory"):
   if request.method == "OPTIONS":
     return jsonify({"success": True}), 200
 
-  client_data = CLIENTS_DATABASE.get(
-      username, CLIENTS_DATABASE["architechlaboratory"]
-  )
+  client_data = CLIENTS_DATABASE.get(username)
+  if client_data is None:
+    return jsonify({"success": False, "error": "Unknown tenant"}), 404
   return (
       jsonify({
           "success": True,
@@ -575,9 +590,9 @@ def reply_live_chat(username="architechlaboratory"):
   if request.method == "OPTIONS":
     return jsonify({"success": True}), 200
 
-  client_data = CLIENTS_DATABASE.get(
-      username, CLIENTS_DATABASE["architechlaboratory"]
-  )
+  client_data = CLIENTS_DATABASE.get(username)
+  if client_data is None:
+    return jsonify({"success": False, "error": "Unknown tenant"}), 404
   data = request.get_json()
   chat_id = data.get("chat_id")
   phone = data.get("phone")
@@ -609,9 +624,9 @@ def toggle_chat_mode(username="architechlaboratory"):
   if request.method == "OPTIONS":
     return jsonify({"success": True}), 200
 
-  client_data = CLIENTS_DATABASE.get(
-      username, CLIENTS_DATABASE["architechlaboratory"]
-  )
+  client_data = CLIENTS_DATABASE.get(username)
+  if client_data is None:
+    return jsonify({"success": False, "error": "Unknown tenant"}), 404
   data = request.get_json()
   chat_id = data.get("chat_id")
   phone = data.get("phone")
@@ -623,24 +638,33 @@ def toggle_chat_mode(username="architechlaboratory"):
   return jsonify({"success": True}), 200
 
 
-def generate_ai_response(prompt_text):
+def generate_ai_response(prompt_text, username="architechlaboratory", sender_phone=""):
+  engine = CLIENT_ENGINES.get(username)
+  if engine is None:
+    raise ValueError(f"Unknown tenant: {username}")
+  engine.tenant_username = username
+  return engine.process_incoming_whatsapp_message(
+      sender_phone, prompt_text, responder=_generate_gemini_response
+  )
+
+
+def _generate_gemini_response(prompt_text, brain):
   try:
-    persona_instruction = leea_brain_instance.get_leea_persona()
     response = client.models.generate_content(
         model="gemini-3.5-flash-lite",
         contents=prompt_text,
-        config={"system_instruction": persona_instruction},
+        config={"system_instruction": brain.persona_instruction},
     )
     return response.text
   except Exception as e:
     logging.error(f"Ralat Gemini API: {e}")
     try:
-      return leea_brain_instance.generate_response(prompt_text)
+      return brain.generate_response(prompt_text)
     except Exception as e2:
       logging.error(f"Ralat Fallback: {e2}")
       return (
-          "Sori bos, line / sistem sedih sikit kejap ni. Cuba try text semula"
-          " lepas ni ye."
+          "Maaf tuan, sistem sedang mengalami gangguan sementara. Sila cuba"
+          " mesej semula sebentar lagi."
       )
 
 
@@ -670,6 +694,27 @@ def send_whatsapp_message(phone_id, token, to_number, message_text):
     )
   except Exception as e:
     logging.error(f"Ralat menghantar mesej WhatsApp: {e}")
+
+
+def send_whatsapp_image(phone_id, token, to_number, image_url):
+  """Hantar imej demo daripada URL HTTPS yang boleh diakses oleh Meta."""
+  if not phone_id or not token or not image_url.startswith("https://"):
+    return False
+  try:
+    response = requests.post(
+        f"https://graph.facebook.com/v21.0/{phone_id}/messages",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"messaging_product": "whatsapp", "to": to_number, "type": "image",
+              "image": {"link": image_url}},
+        timeout=15,
+    )
+    if not response.ok:
+      logging.error("Penghantaran imej demo gagal: HTTP %s", response.status_code)
+      return False
+    return True
+  except requests.RequestException as error:
+    logging.error("Ralat menghantar imej demo: %s", error)
+    return False
 
 
 if __name__ == "__main__":
