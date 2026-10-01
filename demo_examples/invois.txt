@@ -1,9 +1,0 @@
-CONTOH INVOIS — BUKAN INVOIS SAH / BUKTI BAYARAN
-Architech Systems | www.architechsystems.my
-Rujukan: DEMO-SAHaja (bukan nombor invois sebenar)
-Pelanggan: Syarikat Contoh (rekaan)
-Butiran: Setup SEA Bot Basic RM149.00 + langganan bulan pertama RM130.00
-Jumlah ilustrasi: RM279.00
-Status: DEMO — TIADA BAYARAN DIPROSES ATAU DISAHKAN
-Jangan guna contoh ini untuk membuat pembayaran atau tuntutan.
-Invois rasmi dan status bayaran mesti disahkan oleh staf melalui rekod sebenar.
