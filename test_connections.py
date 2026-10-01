@@ -24,6 +24,7 @@ class ConnectionsTest(unittest.TestCase):
             generate.return_value.text = "jawapan ujian"
             self.assertEqual(app.generate_ai_response("soalan biasa", "aluzlia"), "jawapan ujian")
             self.assertIn("Aluzlia", generate.call_args.kwargs["config"]["system_instruction"])
+            self.assertIn("1–2 ayat pendek", generate.call_args.kwargs["config"]["system_instruction"])
             generate.side_effect = RuntimeError("Gemini unavailable")
             self.assertIn("RM130", app.generate_ai_response("harga pakej"))
 
