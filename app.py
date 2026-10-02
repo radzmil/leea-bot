@@ -17,7 +17,7 @@ from demo_examples import wants_product_image
 import requests
 
 # Pastikan import psycopg2 untuk sambungan PostgreSQL
-import psycopg2
+import database
 
 # Konfigurasi Logging
 logging.basicConfig(
@@ -33,7 +33,7 @@ ASAI_MODEL = os.getenv("ASAI_MODEL", "asai/claude-haiku-4.5")
 ASAI_BASE_URL = os.getenv("API_BASE_URL", "https://serveras.click/v1").rstrip("/")
 
 # URL Pangkalan Data PostgreSQL (Tarik dari Variables Railway)
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = database.DATABASE_URL
 
 # Kredensial & Konfigurasi ToyyibPay & SMTP E-mel
 TOYYIBPAY_SECRET_KEY = os.getenv("TOYYIBPAY_SECRET_KEY", "")
@@ -46,14 +46,14 @@ GOOGLE_SHEET_CHAT_HISTORY_URL = os.getenv("GOOGLE_SHEET_CHAT_HISTORY_URL", "")
 
 # Inisialisasi Klien Gemini dan enjin setiap akaun
 CLIENT_ENGINES = {
-    "architechlaboratory": LEEASystemEngine(client_name="Architech Systems"),
+    "architechsystems": LEEASystemEngine(client_name="Architech Systems"),
     "aluzlia": LEEASystemEngine(client_name="Aluzlia"),
 }
 
 # SIMPANAN DATA MULTI-TENANT
 CLIENTS_DATABASE = {
-    "architechlaboratory": {
-        "username": "architechlaboratory",
+    "architechsystems": {
+        "username": "architechsystems",
         "verify_token": os.getenv("VERIFY_TOKEN_ARCHITECH", ""),
         "whatsapp_token": os.getenv(
             "WHATSAPP_TOKEN", os.getenv("WHATSAPP_TOKEN_ARCHITECH", "")
@@ -76,6 +76,36 @@ CLIENTS_DATABASE = {
 
 # Meta boleh menghantar semula webhook yang sama; cache ini terhad per proses.
 PROCESSED_MESSAGE_IDS = {}
+
+
+def claim_incoming_message(username, message_id):
+  """Claim an inbound Meta message atomically across workers before replying."""
+  if not message_id:
+    logging.warning("Abaikan mesej WhatsApp tanpa ID")
+    return False
+  if not DATABASE_URL:
+    seen = PROCESSED_MESSAGE_IDS.setdefault(username, deque(maxlen=1000))
+    if message_id in seen:
+      return False
+    seen.append(message_id)
+    logging.warning("DATABASE_URL tiada; deduplikasi hanya dalam proses ini")
+    return True
+  try:
+    with database.connect(DATABASE_URL) as conn:
+      with conn.cursor() as cursor:
+        cursor.execute("""CREATE TABLE IF NOT EXISTS whatsapp_inbound_claims (
+          tenant VARCHAR(100) NOT NULL,
+          message_id VARCHAR(255) NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (tenant, message_id)
+        )""")
+        cursor.execute(
+            "INSERT INTO whatsapp_inbound_claims (tenant, message_id) VALUES (%s, %s) "
+            "ON CONFLICT DO NOTHING RETURNING message_id", (username, message_id))
+        return cursor.fetchone() is not None
+  except Exception:
+    logging.exception("Gagal semak ID mesej masuk; balasan ditahan untuk elak pendua")
+    return False
 
 
 # --- PELINDUNG CORS UNTUK MEMBENARKAN VERCEL MENGAKSES RAILWAY ---
@@ -118,7 +148,7 @@ def save_chat_to_postgres(username, sender_phone, message_text, role="customer")
         return
 
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = database.connect(DATABASE_URL)
         cursor = conn.cursor()
 
         # 1. Bina jadual 'messages' jika ia belum wujud dalam database
@@ -165,7 +195,7 @@ def load_chat_context(username, sender_phone, limit=10):
   if not DATABASE_URL or not sender_phone:
     return []
   try:
-    with psycopg2.connect(DATABASE_URL) as conn:
+    with database.connect(DATABASE_URL) as conn:
       with conn.cursor() as cursor:
         cursor.execute("SELECT id FROM clients WHERE username = %s", (username,))
         row = cursor.fetchone()
@@ -187,7 +217,7 @@ def load_chat_context(username, sender_phone, limit=10):
 def send_payment_success_email(
     client_email, client_name, client_id, new_expiry_date
 ):
-  """Menghantar e-mel rasmi kejayaan langganan menggunakan architechlaboratory@gmail.com."""
+  """Menghantar e-mel rasmi kejayaan langganan menggunakan architechsystems@gmail.com."""
   subject = "Pembayaran Berjaya - Terima Kasih Kerana Melanggan SEA Bot!"
 
   body = f"""Hi {client_name},
@@ -246,7 +276,7 @@ def send_whatsapp_thank_you(client_phone, client_name, new_expiry_date):
       " perkhidmatan kami! 🚀"
   )
 
-  default_client = CLIENTS_DATABASE.get("architechlaboratory")
+  default_client = CLIENTS_DATABASE.get("architechsystems")
   phone_id = default_client["whatsapp_phone_id"]
   token = default_client["whatsapp_token"]
 
@@ -376,7 +406,7 @@ def save_chat_history_to_sheets(username, phone, sender, message_text, role="cus
 
 @app.route("/webhook", methods=["GET"])
 @app.route("/webhook/", methods=["GET"])
-def verify_webhook(username="architechlaboratory"):
+def verify_webhook(username="architechsystems"):
   client_data = CLIENTS_DATABASE.get(username)
   if client_data is None:
     return "Unknown tenant", 404
@@ -396,13 +426,13 @@ def verify_webhook(username="architechlaboratory"):
 
 @app.route("/webhook", methods=["POST"])
 @app.route("/webhook/", methods=["POST"])
-def handle_webhook(username="architechlaboratory"):
+def handle_webhook(username="architechsystems"):
   client_data = CLIENTS_DATABASE.get(username)
   if client_data is None:
     return "Unknown tenant", 404
 
   body = request.get_json()
-  logging.info(f"Menerima payload webhook untuk akaun [{username}]: {body}")
+  logging.info("Menerima webhook untuk akaun [%s]", username)
 
   try:
     if body.get("object") == "whatsapp_business_account":
@@ -411,24 +441,36 @@ def handle_webhook(username="architechlaboratory"):
           value = change.get("value", {})
           messages = value.get("messages", [])
 
+          incoming_phone_id = str((value.get("metadata") or {}).get("phone_number_id") or "")
+          configured_phone_id = str(client_data.get("whatsapp_phone_id") or "")
+          if messages and (not incoming_phone_id or not configured_phone_id
+                           or incoming_phone_id != configured_phone_id):
+            logging.warning("Abaikan webhook dengan phone_number_id tidak sepadan [%s]", username)
+            continue
+
           for message in messages:
             message_id = message.get("id")
-            seen = PROCESSED_MESSAGE_IDS.setdefault(username, deque(maxlen=1000))
-            if message_id and message_id in seen:
+
+            # Jangan balas mesej keluar yang dipantulkan semula oleh integrasi.
+            metadata = value.get("metadata") or {}
+            own_number = str(metadata.get("display_phone_number") or "")
+            own_id = str(metadata.get("phone_number_id") or client_data.get("whatsapp_phone_id") or "")
+            sender_ids = (message.get("from"), message.get("sender"), message.get("from_user_id"))
+            if (message.get("from_me") is True or message.get("is_from_me") is True
+                or message.get("direction") == "outbound"
+                or any(str(sender).lstrip("+") in (own_number.lstrip("+"), own_id)
+                       for sender in sender_ids if sender and (own_number or own_id))):
+              logging.info("Abaikan mesej keluar/echo [%s]: %s", username, message_id)
               continue
 
-            sender_phone = str(
-                message.get("from")
-                or value.get("contacts", [{}])[0].get("wa_id", "")
-                or message.get("sender", "")
-                or message.get("from_user_id", "")
-            ).strip()
+            sender_phone = str(message.get("from") or message.get("from_user_id")
+                               or message.get("sender") or "").strip()
 
             message_body = message.get("text", {}).get("body", "")
 
             if message_body and sender_phone and sender_phone != "None":
-              if message_id:
-                seen.append(message_id)
+              if not claim_incoming_message(username, message_id):
+                continue
               logging.info(
                   f"Mesej masuk [{username}] drpd {sender_phone}: {message_body}"
               )
@@ -575,7 +617,7 @@ def notify_activation():
         " pengesahan rasmi."
     )
 
-    default_client = CLIENTS_DATABASE.get("architechlaboratory")
+    default_client = CLIENTS_DATABASE.get("architechsystems")
     phone_id = default_client["whatsapp_phone_id"]
     token = default_client["whatsapp_token"]
 
@@ -609,7 +651,7 @@ def notify_activation():
 
 @app.route("/api/chats", methods=["GET", "OPTIONS"])
 @app.route("/api//chats", methods=["GET", "OPTIONS"])
-def get_live_chats(username="architechlaboratory"):
+def get_live_chats(username="architechsystems"):
   if request.method == "OPTIONS":
     return jsonify({"success": True}), 200
 
@@ -628,7 +670,7 @@ def get_live_chats(username="architechlaboratory"):
 
 @app.route("/api/chats/reply", methods=["POST", "OPTIONS"])
 @app.route("/api//chats/reply", methods=["POST", "OPTIONS"])
-def reply_live_chat(username="architechlaboratory"):
+def reply_live_chat(username="architechsystems"):
   if request.method == "OPTIONS":
     return jsonify({"success": True}), 200
 
@@ -662,7 +704,7 @@ def reply_live_chat(username="architechlaboratory"):
 
 @app.route("/api/chats/toggle-mode", methods=["POST", "OPTIONS"])
 @app.route("/api//chats/toggle-mode", methods=["POST", "OPTIONS"])
-def toggle_chat_mode(username="architechlaboratory"):
+def toggle_chat_mode(username="architechsystems"):
   if request.method == "OPTIONS":
     return jsonify({"success": True}), 200
 
@@ -680,45 +722,74 @@ def toggle_chat_mode(username="architechlaboratory"):
   return jsonify({"success": True}), 200
 
 
-def generate_ai_response(prompt_text, username="architechlaboratory", sender_phone="", history=None):
+def generate_ai_response(prompt_text, username="architechsystems", sender_phone="", history=None):
   engine = CLIENT_ENGINES.get(username)
   if engine is None:
     raise ValueError(f"Unknown tenant: {username}")
   # Jawab terus soalan ringkas ini; jangan biarkan pangkalan pengetahuan panjang
   # bertukar menjadi senarai jualan yang tidak diminta.
   normalized = re.sub(r"[^\w\s]", " ", prompt_text.lower())
-  if (username == "architechlaboratory"
+  if (username == "architechsystems"
       and len(normalized.split()) <= 15
       and re.search(r"\b(selain|ade|ada)\b", normalized)
       and re.search(r"\b(sistem|servis|service|buat|produk)\b", normalized)
       and re.search(r"\b(apa|ape|lagi|lain)\b", normalized)):
-    return ("Ada. Selain bot WhatsApp LeeA, Architech Systems juga buat "
-            "sistem automasi dan perisian ikut keperluan bisnes.")
+    response = ("Ada. Selain bot WhatsApp LeeA, Architech Systems juga buat "
+                "sistem automasi dan perisian ikut keperluan bisnes.")
+    return avoid_repeated_reply(response, history)
   engine.tenant_username = username
   def respond(message, brain):
     return _generate_asai_response(message, brain, history, username)
-  return engine.process_incoming_whatsapp_message(sender_phone, prompt_text, responder=respond)
+  response = engine.process_incoming_whatsapp_message(sender_phone, prompt_text, responder=respond)
+  return avoid_repeated_reply(response, history)
 
 
-def _generate_asai_response(prompt_text, brain, history=None, username="architechlaboratory"):
+def normalize_reply(text):
+  return re.sub(r"[^\w\s]", " ", clean_whatsapp_reply(text).casefold()).split()
+
+
+def repeated_reply(response, history):
+  """Bandingkan teks dan soalan bot terdahulu; jangan padankan soalan pelanggan."""
+  previous = [item["text"] for item in (history or [])[-10:]
+              if item.get("sender") == "agent" and item.get("text")]
+  if not previous:
+    return False
+  tokens = normalize_reply(response)
+  if tokens and tokens == normalize_reply(previous[-1]):
+    return True
+  questions = re.findall(r"[^.!?]*\?", clean_whatsapp_reply(response))
+  return any(normalize_reply(question) == normalize_reply(old_question)
+             for question in questions for old in previous
+             for old_question in re.findall(r"[^.!?]*\?", clean_whatsapp_reply(old)))
+
+
+def avoid_repeated_reply(response, history):
+  if repeated_reply(response, history):
+    logging.warning("Balasan/soalan bot berulang; guna rujukan staf tanpa soalan baharu")
+    return "Maaf, saya belum dapat beri jawapan yang lebih tepat berdasarkan maklumat yang ada. Sila rujuk staf melalui saluran sokongan rasmi."
+  return response
+
+
+def _generate_asai_response(prompt_text, brain, history=None, username="architechsystems"):
   try:
     if not ASAI_API_KEY:
       raise ValueError("ASAI_API_KEY belum dikonfigurasi")
     instruction = (brain.persona_instruction +
                    "\nFAKTA SYARIKAT DISAHKAN (rujuk hanya jika relevan, jangan salin semuanya):\n" +
                    load_company_knowledge(username) +
-                   "\nARAHAN FORMAT BALASAN WHATSAPP (utamakan selepas membaca fakta): "
-                   "Gunakan Bahasa Melayu Malaysia untuk semua balasan lalai, termasuk apabila pelanggan "
-                   "menaip bahasa pasar, singkatan atau campuran Inggeris-Melayu. Jangan tukar ke Bahasa "
-                   "Indonesia atau gunakan ungkapan Indonesia seperti 'bisa', 'nggak', 'butuh', 'silakan' "
-                   "dan 'harga cicilan'. Jika pelanggan secara jelas meminta bahasa lain, ikut permintaan itu. "
-                   "Jawab mesej terkini secara terus dalam 1–2 ayat pendek jika soalan mudah. "
-                   "Jangan guna senarai bernombor, bullet atau menu pilihan melainkan pelanggan "
-                   "meminta senarai atau langkah terperinci. Jangan guna awalan seperti "
+                    "\nARAHAN KHUSUS BALASAN WHATSAPP (ikut gaya dan batas dalam persona): "
+                    "Jangan guna ungkapan Indonesia seperti 'bisa', 'nggak', 'butuh', 'silakan' "
+                    "dan 'harga cicilan'. Jangan guna awalan seperti "
                    "💬 [Pegawai Khidmat Pelanggan - Architech Systems]: atau "
                    "[Customer Service - Architech Systems]:. Balas sebagai teks WhatsApp biasa. "
-                   "Jangan ulang salam, pengenalan atau soalan yang sudah dijawab. Tanya satu soalan hanya jika perlu untuk "
-                   "menjawab permintaan pelanggan; jika sekadar berbual, balas seperti perbualan biasa. "
+                   "Baca mesej terkini dan sejarah chat sebelum menjawab: kenal pasti soalan sebenar, "
+                   "termasuk rujukan ringkas seperti 'ni' atau 'itu' daripada konteks yang sama. "
+                   "Jawab setiap soalan baharu yang ditanya, bukan ulang promosi atau jawapan terdahulu. "
+                   "Jika maksud atau fakta tidak cukup jelas, akui ketidakpastian dan tanya SATU soalan "
+                   "penjelasan yang khusus; jangan reka jawapan. Semak soalan yang sudah diajukan oleh bot "
+                   "dan dijawab pelanggan: jangan tanya semula atau ulang soalan susulan yang sama. "
+                   "Jika pelanggan ulang soalan kerana jawapan sebelum ini tidak menjawabnya, beri penjelasan "
+                   "lebih tepat, bukan ulang teks jawapan sebelumnya. "
                    "Untuk harga, terma, keselamatan atau isu teknikal, beri butiran penting yang relevan.")
     messages = [{"role": "system", "content": instruction}]
     messages += [{"role": "user" if item["sender"] == "customer" else "assistant",
@@ -726,17 +797,28 @@ def _generate_asai_response(prompt_text, brain, history=None, username="architec
                  for item in (history or [])[-10:]
                  if item.get("sender") in ("customer", "agent") and item.get("text")]
     messages.append({"role": "user", "content": prompt_text})
-    response = requests.post(
-        f"{ASAI_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {ASAI_API_KEY}", "Content-Type": "application/json"},
-        json={"model": ASAI_MODEL, "messages": messages, "max_tokens": 350},
-        timeout=30,
-    )
-    response.raise_for_status()
-    answer = response.json()["choices"][0]["message"]["content"]
-    if not isinstance(answer, str) or not answer.strip():
-      raise ValueError("Jawapan AI kosong")
-    return answer.strip()
+    for attempt in range(2):
+      response = requests.post(
+          f"{ASAI_BASE_URL}/chat/completions",
+          headers={"Authorization": f"Bearer {ASAI_API_KEY}", "Content-Type": "application/json"},
+          json={"model": ASAI_MODEL, "messages": messages, "max_tokens": 350},
+          timeout=30,
+      )
+      response.raise_for_status()
+      answer = response.json()["choices"][0]["message"]["content"]
+      if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("Jawapan AI kosong")
+      answer = answer.strip()
+      if not repeated_reply(answer, history):
+        return answer
+      if attempt == 0:
+        messages.append({"role": "assistant", "content": answer})
+        messages.append({"role": "user", "content":
+                         "Jawapan itu mengulang balasan atau soalan bot yang sudah ada dalam sejarah. "
+                         "Jawab maksud mesej terkini dengan fakta yang tersedia, tanpa mengulang ayat "
+                         "atau soalan terdahulu. Jika perlu penjelasan, tanya soalan baharu yang khusus."})
+    logging.warning("AI mengulang balasan; balasan berulang tidak dihantar")
+    return "Maaf, saya belum dapat beri jawapan yang lebih tepat berdasarkan maklumat yang ada. Sila rujuk staf melalui saluran sokongan rasmi."
   except Exception as e:
     logging.error("Ralat asAI API: %s", type(e).__name__)
     try:

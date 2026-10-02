@@ -11,7 +11,7 @@ def get_sales_document(message, tenant):
     lower = text.lower()
     if not re.search(r"\b(sebut harga|quotation|quote|invois|invoice)\b", lower):
         return None
-    if tenant != "architechlaboratory":
+    if tenant != "architechsystems":
         return "Maaf, katalog harga akaun ini belum dikonfigurasi. Sila hubungi staf untuk sebut harga atau invois."
 
     invoice = bool(re.search(r"\b(invois|invoice)\b", lower))

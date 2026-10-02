@@ -4,7 +4,7 @@ import re
 
 
 def get_payment_guidance(message, tenant):
-    if tenant != "architechlaboratory":
+    if tenant != "architechsystems":
         return None
     if not re.search(r"\b(bayar|bayaran|pembayaran|payment|pay|paid|dah bayar|resit|receipt|bank|transfer|duitnow|qr|fpx|toyyibpay)\b", message.lower()):
         return None
