@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import select
 import smtplib
 from collections import deque
 from datetime import datetime
@@ -11,6 +12,9 @@ from email.mime.text import MIMEText
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+from flask_sock import Sock
+from itsdangerous import BadSignature
+from chat_ticket import verify as verify_chat_ticket
 from leea_engine import LEEASystemEngine
 from company_knowledge import load_company_knowledge
 from demo_examples import wants_product_image
@@ -27,6 +31,47 @@ logging.basicConfig(
 load_dotenv()
 
 app = Flask(__name__)
+sock = Sock(app)
+
+
+@sock.route("/ws/chat")
+def chat_socket(ws):
+    origin = request.headers.get("Origin", "")
+    secret = os.getenv("CHAT_SOCKET_SECRET", "")
+    allowed_origin = os.getenv("CHAT_SOCKET_ORIGIN", "")
+    local_origin = allowed_origin == "http://127.0.0.1:5001" and os.getenv("LOCAL_HTTP") == "1"
+    try:
+        if (len(secret) < 32 or not allowed_origin or origin != allowed_origin
+                or (allowed_origin.startswith("http://") and not local_origin)
+                or not verify_chat_ticket(secret, request.args.get("ticket", ""), "architechsystems")):
+            ws.close()
+            return
+    except BadSignature:
+        ws.close()
+        return
+    if not DATABASE_URL:
+        ws.close()
+        return
+    try:
+        conn = database.connect(DATABASE_URL)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute("LISTEN leea_chat")
+            while True:
+                ready, _, _ = select.select([conn], [], [], 20)
+                if ready:
+                    conn.poll()
+                    while conn.notifies:
+                        notification = conn.notifies.pop(0)
+                        if notification.payload == "architechsystems":
+                            ws.send("refresh")
+                else:
+                    ws.send("ping")
+        finally:
+            conn.close()
+    except (OSError, ConnectionError, database.psycopg2.Error):
+        logging.exception("Sambungan WebSocket chat terputus")
 
 ASAI_API_KEY = os.getenv("ASAI_API_KEY", "")
 ASAI_MODEL = os.getenv("ASAI_MODEL", "asai/claude-haiku-4.5")
@@ -79,17 +124,13 @@ PROCESSED_MESSAGE_IDS = {}
 
 
 def claim_incoming_message(username, message_id):
-  """Claim an inbound Meta message atomically across workers before replying."""
+  """Return True for a new message, False for a duplicate, None on DB failure."""
   if not message_id:
     logging.warning("Abaikan mesej WhatsApp tanpa ID")
     return False
   if not DATABASE_URL:
-    seen = PROCESSED_MESSAGE_IDS.setdefault(username, deque(maxlen=1000))
-    if message_id in seen:
-      return False
-    seen.append(message_id)
-    logging.warning("DATABASE_URL tiada; deduplikasi hanya dalam proses ini")
-    return True
+    logging.error("DATABASE_URL tiada; mesej tidak boleh diproses")
+    return None
   try:
     with database.connect(DATABASE_URL) as conn:
       with conn.cursor() as cursor:
@@ -105,6 +146,25 @@ def claim_incoming_message(username, message_id):
         return cursor.fetchone() is not None
   except Exception:
     logging.exception("Gagal semak ID mesej masuk; balasan ditahan untuk elak pendua")
+    return None
+
+
+def release_incoming_message(username, message_id):
+  """Allow Meta to retry when persistence fails before a reply is sent."""
+  if not DATABASE_URL:
+    seen = PROCESSED_MESSAGE_IDS.get(username)
+    if seen and message_id in seen:
+      seen.remove(message_id)
+    return True
+  try:
+    with database.connect(DATABASE_URL) as conn:
+      with conn.cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM whatsapp_inbound_claims WHERE tenant = %s AND message_id = %s",
+            (username, message_id))
+    return True
+  except Exception:
+    logging.exception("Gagal melepaskan tuntutan mesej; semakan manual diperlukan")
     return False
 
 
@@ -145,14 +205,14 @@ def save_chat_to_postgres(username, sender_phone, message_text, role="customer")
     """
     if not DATABASE_URL:
         logging.warning("DATABASE_URL tiada. Melangkau proses penyimpanan PostgreSQL.")
-        return
+        return False
 
     try:
-        conn = database.connect(DATABASE_URL)
-        cursor = conn.cursor()
+        with database.connect(DATABASE_URL) as conn:
+          with conn.cursor() as cursor:
 
-        # 1. Bina jadual 'messages' jika ia belum wujud dalam database
-        cursor.execute("""
+            # 1. Bina jadual 'messages' jika ia belum wujud dalam database
+            cursor.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
                 client_id INTEGER,
@@ -161,33 +221,34 @@ def save_chat_to_postgres(username, sender_phone, message_text, role="customer")
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS prospect_phone VARCHAR(50);")
+            cursor.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS prospect_phone VARCHAR(50);")
 
         # 2. Dapatkan ID Klien berdasarkan nama pengguna
-        cursor.execute("SELECT id FROM clients WHERE username = %s;", (username,))
-        res = cursor.fetchone()
+            cursor.execute("SELECT id FROM clients WHERE username = %s;", (username,))
+            res = cursor.fetchone()
 
-        if res:
-            client_id = res[0]
+            if res:
+              client_id = res[0]
 
             # Jika mesej daripada pelanggan, rekod sender sbg no telefon. Jika tidak, "Zulfa Bot".
-            db_sender = sender_phone if role == "customer" else "Zulfa Bot"
+              db_sender = sender_phone if role == "customer" else "Zulfa Bot"
 
             # 3. Masukkan rekod mesej ke dalam pangkalan data
-            cursor.execute(
+              cursor.execute(
                 "INSERT INTO messages (client_id, sender, message, prospect_phone, timestamp) VALUES (%s, %s, %s, %s, NOW());",
                 (client_id, db_sender, message_text, sender_phone)
             )
+              if username == "architechsystems":
+                  cursor.execute("SELECT pg_notify('leea_chat', %s)", (username,))
 
-            conn.commit()
-            logging.info(f"Mesej daripada {db_sender} berjaya didaftarkan ke PostgreSQL.")
-        else:
-            logging.warning(f"Sistem gagal mencari ID untuk klien: {username}")
-
-        cursor.close()
-        conn.close()
+            else:
+              logging.warning("Sistem gagal mencari ID untuk klien: %s", username)
+        if res:
+            logging.info("Mesej berjaya didaftarkan ke PostgreSQL [%s]", username)
+        return bool(res)
     except Exception as e:
-        logging.error(f"Ralat menyambung/menyimpan ke PostgreSQL: {e}")
+        logging.error("Ralat menyambung/menyimpan ke PostgreSQL: %s", type(e).__name__)
+        return False
 
 
 def load_chat_context(username, sender_phone, limit=10):
@@ -448,6 +509,8 @@ def handle_webhook(username="architechsystems"):
             logging.warning("Abaikan webhook dengan phone_number_id tidak sepadan [%s]", username)
             continue
 
+          contacts = {str(contact.get("wa_id")): (contact.get("profile") or {}).get("name")
+                      for contact in value.get("contacts", []) if isinstance(contact, dict)}
           for message in messages:
             message_id = message.get("id")
 
@@ -469,11 +532,26 @@ def handle_webhook(username="architechsystems"):
             message_body = message.get("text", {}).get("body", "")
 
             if message_body and sender_phone and sender_phone != "None":
-              if not claim_incoming_message(username, message_id):
+              profile_name = contacts.get(sender_phone.lstrip("+"))
+              profile_name = profile_name.strip()[:150] if isinstance(profile_name, str) else ""
+              if profile_name and DATABASE_URL:
+                try:
+                  with database.connect(DATABASE_URL) as conn:
+                    with conn.cursor() as cursor:
+                      cursor.execute("""INSERT INTO prospect_contacts (client_id, phone, name, source)
+                        SELECT id, %s, %s, 'auto' FROM clients WHERE username = %s
+                        ON CONFLICT (client_id, phone) DO UPDATE SET name = EXCLUDED.name,
+                        updated_at = NOW() WHERE prospect_contacts.source = 'auto'""",
+                        (sender_phone, profile_name, username))
+                except Exception as exc:
+                  logging.warning("Nama profil WhatsApp tidak tersimpan [%s]: %s", username, exc)
+              claimed = claim_incoming_message(username, message_id)
+              if claimed is None:
+                # Do not acknowledge an unprocessed message: Meta may retry it.
+                return "Service Unavailable", 503
+              if not claimed:
                 continue
-              logging.info(
-                  f"Mesej masuk [{username}] drpd {sender_phone}: {message_body}"
-              )
+              logging.info("Mesej masuk diterima [%s]", username)
 
               chats = client_data["live_chats"]
               existing_chat = next((c for c in chats if c["phone"].lstrip("+") == sender_phone.lstrip("+")), None)
@@ -489,7 +567,10 @@ def handle_webhook(username="architechsystems"):
               )
 
               # SIMPAN MESEJ MASUK KE POSTGRESQL DASHBOARD
-              save_chat_to_postgres(username, sender_phone, message_body, role="customer")
+              if save_chat_to_postgres(username, sender_phone, message_body, role="customer") is False:
+                logging.error("Mesej masuk tidak tersimpan untuk portal [%s]", username)
+                release_incoming_message(username, message_id)
+                return "Service Unavailable", 503
 
               clean_sender = sender_phone.replace("+", "")
               chats = client_data["live_chats"]
@@ -544,7 +625,7 @@ def handle_webhook(username="architechsystems"):
                     response_text,
                 )
                 if sent is False:
-                  logging.error("Balasan WhatsApp gagal dihantar untuk akaun %s, pengirim %s", username, sender_phone)
+                  logging.error("Balasan WhatsApp gagal dihantar untuk akaun %s", username)
                   continue
                 chat_item["messages"].append({
                     "sender": "agent",
@@ -562,16 +643,17 @@ def handle_webhook(username="architechsystems"):
                 )
 
                 # SIMPAN BALASAN BOT KE POSTGRESQL DASHBOARD
-                save_chat_to_postgres(username, sender_phone, response_text, role="agent")
+                if save_chat_to_postgres(username, sender_phone, response_text, role="agent") is False:
+                  logging.error("Balasan bot tidak tersimpan untuk portal [%s]", username)
 
               else:
                 logging.info(
-                    f"Chat {sender_phone} di bawah akaun {username} berada"
+                  f"Chat di bawah akaun {username} berada"
                     " dalam mod Human Touch."
                 )
             else:
               logging.warning(
-                  f"Gagal ekstrak nombor telefon daripada payload: {message}"
+                  "Mesej webhook tiada nombor pengirim atau teks [%s]", username
               )
 
       return "EVENT_RECEIVED", 200

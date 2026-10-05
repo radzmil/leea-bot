@@ -20,6 +20,15 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS prospect_phone VARCHAR(50);
 CREATE INDEX IF NOT EXISTS messages_client_prospect_id_idx
     ON messages (client_id, prospect_phone, id DESC);
 
+CREATE TABLE IF NOT EXISTS prospect_contacts (
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    phone VARCHAR(50) NOT NULL,
+    name VARCHAR(150) NOT NULL,
+    source VARCHAR(10) NOT NULL CHECK (source IN ('auto', 'manual')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (client_id, phone)
+);
+
 CREATE TABLE IF NOT EXISTS whatsapp_inbound_claims (
     tenant VARCHAR(100) NOT NULL,
     message_id VARCHAR(255) NOT NULL,

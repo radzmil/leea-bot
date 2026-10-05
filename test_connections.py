@@ -24,6 +24,8 @@ class ConnectionsTest(unittest.TestCase):
             send.assert_not_called()
 
     def test_database_claim_is_atomic_and_fails_closed(self):
+        with patch.object(app, "DATABASE_URL", ""):
+            self.assertIsNone(app.claim_incoming_message("architechsystems", "mid"))
         with patch.object(app, "DATABASE_URL", "postgres://test"), \
              patch.object(app.database, "connect") as connect:
             cursor = connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value
@@ -32,7 +34,49 @@ class ConnectionsTest(unittest.TestCase):
             self.assertFalse(app.claim_incoming_message("architechsystems", "mid"))
             self.assertIn("ON CONFLICT DO NOTHING", cursor.execute.call_args.args[0])
             connect.side_effect = RuntimeError("db down")
-            self.assertFalse(app.claim_incoming_message("architechsystems", "new"))
+            self.assertIsNone(app.claim_incoming_message("architechsystems", "new"))
+
+    def test_webhook_retries_when_database_claim_fails(self):
+        tenant = app.CLIENTS_DATABASE["architechsystems"]
+        payload = {"object": "whatsapp_business_account", "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": "bot-phone-id"},
+            "messages": [{"id": "mid", "from": "60111", "text": {"body": "Hai"}}]
+        }}]}]}
+        with patch.dict(tenant, {"live_chats": [], "whatsapp_phone_id": "bot-phone-id"}), \
+             patch.object(app, "claim_incoming_message", return_value=None), \
+             patch.object(app, "send_whatsapp_message") as send:
+            response = app.app.test_client().post("/webhook", json=payload)
+            self.assertEqual(response.status_code, 503)
+            send.assert_not_called()
+            self.assertEqual(tenant["live_chats"], [])
+
+    def test_webhook_retries_when_incoming_message_cannot_be_saved(self):
+        tenant = app.CLIENTS_DATABASE["architechsystems"]
+        payload = {"object": "whatsapp_business_account", "entry": [{"changes": [{"value": {
+            "metadata": {"phone_number_id": "bot-phone-id"},
+            "messages": [{"id": "mid", "from": "60111", "text": {"body": "Hai"}}]
+        }}]}]}
+        with patch.dict(tenant, {"live_chats": [], "whatsapp_phone_id": "bot-phone-id"}), \
+             patch.object(app, "claim_incoming_message", return_value=True), \
+             patch.object(app, "release_incoming_message") as release, \
+             patch.object(app, "load_chat_context", return_value=[]), \
+             patch.object(app, "save_customer_to_google_sheets"), \
+             patch.object(app, "save_chat_history_to_sheets"), \
+             patch.object(app, "save_chat_to_postgres", return_value=False), \
+             patch.object(app, "send_whatsapp_message") as send:
+            response = app.app.test_client().post("/webhook", json=payload)
+            self.assertEqual(response.status_code, 503)
+            release.assert_called_once_with("architechsystems", "mid")
+            send.assert_not_called()
+            self.assertEqual(tenant["live_chats"], [])
+
+    def test_save_chat_reports_missing_database_and_missing_tenant(self):
+        with patch.object(app, "DATABASE_URL", ""):
+            self.assertFalse(app.save_chat_to_postgres("architechsystems", "60111", "Hai"))
+        with patch.object(app, "DATABASE_URL", "postgres://test"), \
+             patch.object(app.database, "connect") as connect:
+            connect.return_value.__enter__.return_value.cursor.return_value.__enter__.return_value.fetchone.return_value = None
+            self.assertFalse(app.save_chat_to_postgres("architechsystems", "60111", "Hai"))
 
     def test_webhook_ignores_outbound_echo(self):
         tenant = app.CLIENTS_DATABASE["architechsystems"]
@@ -187,7 +231,14 @@ class ConnectionsTest(unittest.TestCase):
 
     def test_webhook_duplicate_and_distinct_prospects(self):
         tenant = app.CLIENTS_DATABASE["architechsystems"]
+        seen = set()
+        def claim(_tenant, message_id):
+            if message_id in seen:
+                return False
+            seen.add(message_id)
+            return True
         with patch.dict(tenant, {"live_chats": [], "whatsapp_phone_id": "bot-phone-id"}), patch.object(app, "PROCESSED_MESSAGE_IDS", {}), patch.object(app, "DATABASE_URL", ""), \
+             patch.object(app, "claim_incoming_message", side_effect=claim), \
              patch.object(app, "load_chat_context", return_value=[]), \
              patch.object(app, "save_customer_to_google_sheets"), \
              patch.object(app, "save_chat_history_to_sheets"), \
@@ -209,6 +260,7 @@ class ConnectionsTest(unittest.TestCase):
         tenant = app.CLIENTS_DATABASE["architechsystems"]
         sender_id = "MY.1689129625508391"
         with patch.dict(tenant, {"live_chats": [], "whatsapp_phone_id": "bot-phone-id"}), patch.object(app, "PROCESSED_MESSAGE_IDS", {}), patch.object(app, "DATABASE_URL", ""), \
+             patch.object(app, "claim_incoming_message", side_effect=[True, False]), \
              patch.object(app, "load_chat_context", return_value=[]) as load_context, \
              patch.object(app, "save_customer_to_google_sheets"), \
              patch.object(app, "save_chat_history_to_sheets"), \
@@ -232,6 +284,7 @@ class ConnectionsTest(unittest.TestCase):
         tenant = app.CLIENTS_DATABASE["architechsystems"]
         with patch.dict(tenant, {"live_chats": [], "whatsapp_phone_id": "phone-id", "whatsapp_token": "token"}), \
              patch.object(app, "PROCESSED_MESSAGE_IDS", {}), patch.object(app, "DATABASE_URL", ""), \
+             patch.object(app, "claim_incoming_message", return_value=True), \
              patch.object(app, "load_chat_context", return_value=[]), \
              patch.object(app, "save_customer_to_google_sheets"), \
              patch.object(app, "save_chat_history_to_sheets"), \
