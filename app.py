@@ -155,7 +155,6 @@ GOOGLE_SHEET_CHAT_HISTORY_URL = os.getenv("GOOGLE_SHEET_CHAT_HISTORY_URL", "")
 # Inisialisasi Klien Gemini dan enjin setiap akaun
 CLIENT_ENGINES = {
     "architechsystems": LEEASystemEngine(client_name="Architech Systems"),
-    "aluzlia": LEEASystemEngine(client_name="Aluzlia"),
 }
 
 # SIMPANAN DATA MULTI-TENANT
@@ -170,14 +169,6 @@ CLIENTS_DATABASE = {
             "WHATSAPP_PHONE_ID", os.getenv("WHATSAPP_PHONE_ID_ARCHITECH", "")
         ),
         "demo_product_image_url": os.getenv("DEMO_PRODUCT_IMAGE_URL_ARCHITECH", ""),
-        "live_chats": [],
-    },
-    "aluzlia": {
-        "username": "aluzlia",
-        "verify_token": os.getenv("VERIFY_TOKEN_ALUZLIA", ""),
-        "whatsapp_token": os.getenv("WHATSAPP_TOKEN_ALUZLIA", ""),
-        "whatsapp_phone_id": os.getenv("WHATSAPP_PHONE_ID_ALUZLIA", ""),
-        "demo_product_image_url": os.getenv("DEMO_PRODUCT_IMAGE_URL_ALUZLIA", ""),
         "live_chats": [],
     },
 }
@@ -474,8 +465,8 @@ def toyyibpay_callback():
       )
 
   except Exception as e:
-    logging.error(f"Ralat memproses ToyyibPay callback: {e}")
-    return jsonify({"status": "error", "message": str(e)}), 500
+    logging.error("Ralat memproses ToyyibPay callback: %s", type(e).__name__)
+    return jsonify({"status": "error", "message": "Internal server error"}), 500
 
 
 # --- FUNGSI SIMPAN NOMBOR PELANGGAN KE GOOGLE SHEETS ---
@@ -495,9 +486,9 @@ def save_customer_to_google_sheets(username, phone):
 
   try:
     response = requests.post(GOOGLE_SHEET_WEB_APP_URL, json=payload, timeout=5)
-    logging.info(f"Nombor {phone} direkodkan ke Sheets: {response.text}")
+    logging.info("Permintaan simpan kenalan ke Sheets: HTTP %s", response.status_code)
   except Exception as e:
-    logging.error(f"Gagal hantar nombor ke Sheets: {e}")
+    logging.error("Gagal hantar nombor ke Sheets: %s", type(e).__name__)
 
 
 # --- FUNGSI SIMPAN CHAT HISTORY KE GOOGLE SHEETS (6 LAJUR TEPAT) ---
@@ -519,11 +510,9 @@ def save_chat_history_to_sheets(username, phone, sender, message_text, role="cus
     response = requests.post(
         GOOGLE_SHEET_CHAT_HISTORY_URL, json=payload, timeout=5
     )
-    logging.info(
-        f"Chat history drpd {phone} ({sender} / {role}) direkodkan ke Log_Chat."
-    )
+    logging.info("Permintaan simpan chat ke Sheets: HTTP %s", response.status_code)
   except Exception as e:
-    logging.error(f"Gagal hantar chat history ke Google Sheets: {e}")
+    logging.error("Gagal hantar chat history ke Google Sheets: %s", type(e).__name__)
 
 
 # --- WEBHOOK ENDPOINTS (WHATSAPP) ---
@@ -975,7 +964,7 @@ def _generate_asai_response(prompt_text, brain, history=None, username="architec
     try:
       return brain.generate_response(prompt_text)
     except Exception as e2:
-      logging.error(f"Ralat Fallback: {e2}")
+      logging.error("Ralat Fallback: %s", type(e2).__name__)
       return (
           "Maaf tuan, sistem sedang mengalami gangguan sementara. Sila cuba"
           " mesej semula sebentar lagi."
@@ -1012,12 +1001,12 @@ def send_whatsapp_message(phone_id, token, to_number, message_text):
   try:
     response = requests.post(url, headers=headers, json=payload, timeout=15)
     if not response.ok:
-      logging.error("Meta menolak balasan WhatsApp: HTTP %s - %s", response.status_code, response.text)
+      logging.error("Meta menolak balasan WhatsApp: HTTP %s", response.status_code)
       return False
     logging.info("Meta menerima permintaan balasan WhatsApp: HTTP %s", response.status_code)
     return True
   except Exception as e:
-    logging.error(f"Ralat menghantar mesej WhatsApp: {e}")
+    logging.error("Ralat menghantar mesej WhatsApp: %s", type(e).__name__)
     return False
 
 
@@ -1038,7 +1027,7 @@ def send_whatsapp_image(phone_id, token, to_number, image_url):
       return False
     return True
   except requests.RequestException as error:
-    logging.error("Ralat menghantar imej demo: %s", error)
+    logging.error("Ralat menghantar imej demo: %s", type(error).__name__)
     return False
 
 

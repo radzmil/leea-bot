@@ -26,14 +26,14 @@ cannot be configured or tested from this repository.
 The bot already depends on `psycopg2-binary` in `requirements.txt`. The `web`
 service must install a PostgreSQL driver appropriate for its **own** language;
 its source and dependency manifest are not present here. Sharing one Postgres
-database does not automatically register SBLeisure: the current bot code has
-`architechsystems` and `aluzlia` configured. `aluzlia` is not assumed to be
-SBLeisure; its mapping must be confirmed before changing it.
+database does not automatically register SBLeisure: the current bot code only
+configures `architechsystems`. Register other tenants only after confirming
+their identity and provisioning them separately.
 
 Confirmed business identities: SBLeisure / Zulfa has client reference
 `CLI-1000`; Architech Systems / LeeA has `CLI-1001`. The WhatsApp tenant
-username for SBLeisure is still unconfirmed. Do not rename `aluzlia`, insert
-an assumed SBLeisure username, or route Zulfa traffic through LeeA solely
+username for SBLeisure is still unconfirmed. Do not insert
+an assumed SBLeisure username or route Zulfa traffic through LeeA solely
 based on these business references.
 
 Reserved business client references (not yet assigned): `CLI-1002` and

@@ -52,10 +52,10 @@ CREATE TABLE IF NOT EXISTS whatsapp_inbound_claims (
 
 COMMIT;
 
--- Known usernames in this bot repository. Do not assume aluzlia is SBLeisure.
+-- Known username in this bot repository.
 -- If production already has the legacy username, run migrate_architech_username.sql
 -- first so existing messages retain their client_id.
-INSERT INTO clients (username) VALUES ('architechsystems'), ('aluzlia')
+INSERT INTO clients (username) VALUES ('architechsystems')
 ON CONFLICT (username) DO NOTHING;
 
 -- Add each real bot username after confirming its identity, e.g.:

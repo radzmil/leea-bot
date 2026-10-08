@@ -1,7 +1,7 @@
 # Masukkan contoh demo LeeA
 
 1. Sunting `sebut_harga.txt` dan `invois.txt` dalam folder ini untuk menggantikan butiran ilustrasi. Pastikan label **CONTOH / BUKAN DOKUMEN RASMI** kekal. Jangan letak nombor akaun atau data pelanggan sebenar. Bot membaca kandungan teks semasa pelanggan menaip "contoh sebut harga" atau "contoh invois"; untuk perubahan pada pelayan, deploy fail yang dikemas kini.
-2. Untuk gambar produk, sediakan imej JPG/PNG milik klien yang dibenarkan untuk dikongsi. Hoskan pada URL HTTPS awam yang boleh diakses pelayan Meta (bukan laluan fail tempatan, bukan URL halaman web, bukan SVG contoh di sini). Tetapkan `DEMO_PRODUCT_IMAGE_URL_ARCHITECH` atau `DEMO_PRODUCT_IMAGE_URL_ALUZLIA` dalam environment pelayan bagi akaun yang betul, kemudian mulakan semula aplikasi. Jangan letak token atau URL sensitif dalam repo.
+2. Untuk gambar produk, sediakan imej JPG/PNG milik klien yang dibenarkan untuk dikongsi. Hoskan pada URL HTTPS awam yang boleh diakses pelayan Meta (bukan laluan fail tempatan, bukan URL halaman web, bukan SVG contoh di sini). Tetapkan `DEMO_PRODUCT_IMAGE_URL_ARCHITECH` dalam environment pelayan, kemudian mulakan semula aplikasi. Jangan letak token atau URL sensitif dalam repo.
 3. Hantar mesej ujian "contoh gambar produk" kepada nombor WhatsApp akaun tersebut. Bot cuba menghantar imej dan kemudian mesej teks pengesahan; jika permintaan media gagal, bot menghantar mesej kegagalan. Semak log HTTP tanpa menyalin token atau maklumat pelanggan.
 4. `gambar_produk.svg` hanyalah lakaran setempat untuk melihat rupa demo; ia tidak dihantar secara automatik. Jika URL imej belum ditetapkan, bot menjawab bahawa gambar belum tersedia.
 

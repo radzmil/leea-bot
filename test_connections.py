@@ -136,13 +136,20 @@ class ConnectionsTest(unittest.TestCase):
 
     def test_architech_website_knowledge_is_in_prompt(self):
         from company_knowledge import load_company_knowledge
-        self.assertIn("SENARIO ILUSTRASI", load_company_knowledge("architechsystems"))
+        knowledge = load_company_knowledge("architechsystems")
+        self.assertIn("SENARIO ILUSTRASI", knowledge)
+        self.assertIn("demo atau simulasi sistem", knowledge)
+        self.assertIn("versi 1 sudah penuh", knowledge)
+        self.assertIn("kapasiti pengguna akan ditambah", knowledge)
+        self.assertIn("pasukan sales akan menghubungi", knowledge)
+        self.assertNotIn("Gerak Gempur Cikgu Leea", load_company_knowledge("aluzlia"))
         self.assertEqual(load_company_knowledge("unknown"), "")
         with patch.object(app.requests, "post") as generate:
             generate.return_value.json.return_value = {"choices": [{"message": {"content": "Baik"}}]}
             app.generate_ai_response("Apa contoh penyelesaian di laman?")
             instruction = generate.call_args.kwargs["json"]["messages"][0]["content"]
             self.assertIn("latihan kuiz interaktif", instruction)
+            self.assertIn("versi 1 sudah penuh", instruction)
             self.assertIn("bukan kajian kes sebenar", instruction)
 
     def test_short_reply_for_other_services(self):
