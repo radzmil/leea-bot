@@ -123,6 +123,7 @@ class ConnectionsTest(unittest.TestCase):
             self.assertEqual(app.generate_ai_response("soalan biasa", "aluzlia"), "jawapan ujian")
             instruction = generate.call_args.kwargs["json"]["messages"][0]["content"]
             self.assertIn("Aluzlia", instruction)
+            self.assertNotIn("Gerak Gempur Cikgu Leea", instruction)
             self.assertIn("1–2 ayat pendek", instruction)
             self.assertIn("Jangan berpura-pura menjadi manusia", instruction)
             self.assertIn("jangan guna senarai bernombor, bullet atau menu pilihan", instruction)
@@ -132,6 +133,17 @@ class ConnectionsTest(unittest.TestCase):
             self.assertEqual(generate.call_args.kwargs["json"]["model"], "asai/claude-haiku-4.5")
             generate.side_effect = RuntimeError("asAI unavailable")
             self.assertIn("RM130", app.generate_ai_response("harga pakej"))
+
+    def test_architech_website_knowledge_is_in_prompt(self):
+        from company_knowledge import load_company_knowledge
+        self.assertIn("SENARIO ILUSTRASI", load_company_knowledge("architechsystems"))
+        self.assertEqual(load_company_knowledge("unknown"), "")
+        with patch.object(app.requests, "post") as generate:
+            generate.return_value.json.return_value = {"choices": [{"message": {"content": "Baik"}}]}
+            app.generate_ai_response("Apa contoh penyelesaian di laman?")
+            instruction = generate.call_args.kwargs["json"]["messages"][0]["content"]
+            self.assertIn("latihan kuiz interaktif", instruction)
+            self.assertIn("bukan kajian kes sebenar", instruction)
 
     def test_short_reply_for_other_services(self):
         with patch.object(app.requests, "post") as generate:

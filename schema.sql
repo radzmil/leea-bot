@@ -7,6 +7,9 @@ CREATE TABLE IF NOT EXISTS clients (
     username VARCHAR(100) NOT NULL UNIQUE
 );
 
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS token_balance BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS token_quota BIGINT NOT NULL DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS messages (
     id SERIAL PRIMARY KEY,
     client_id INTEGER,
@@ -28,6 +31,17 @@ CREATE TABLE IF NOT EXISTS prospect_contacts (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (client_id, phone)
 );
+
+CREATE TABLE IF NOT EXISTS chat_modes (
+    client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    phone VARCHAR(50) NOT NULL,
+    mode VARCHAR(20) NOT NULL DEFAULT 'ai' CHECK (mode IN ('ai', 'human')),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (client_id, phone)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_modes_client_phone
+    ON chat_modes(client_id, phone);
 
 CREATE TABLE IF NOT EXISTS whatsapp_inbound_claims (
     tenant VARCHAR(100) NOT NULL,

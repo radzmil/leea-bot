@@ -16,7 +16,8 @@ def load_company_knowledge(username):
             return ""
         sections = []
         for key, label in (("company_role", "Peranan syarikat"),
-                           ("products", "Produk dan perbezaan")):
+                           ("products", "Produk dan perbezaan"),
+                           ("website", "Maklumat laman web awam (bukan pengesahan prestasi atau janji perkhidmatan)")):
             value = entry.get(key)
             if isinstance(value, str) and value.strip():
                 sections.append(f"{label}: {value.strip()}")
